@@ -1,0 +1,7 @@
+0.0.0.0 localhost
+0.0.0.0 googleadservices.com pagead2.googlesyndication.com partner.googleadservices.com static.doubleclick.net www.googleadservices.com ad.doubleclick.net youtubeads.googleapis.com pubads.g.doubleclick.net video-stats.video.google.com
+0.0.0.0 adservice.google.com adservice.google.co.in ads.youtube.com analytics.youtube.com www.googletagservices.com googleads.g.doubleclick.net r1---sn-a5meknlz.googlevideo.com r2---sn-a5meknlz.googlevideo.com r3---sn-a5meknlz.googlevideo.com
+0.0.0.0 r4---sn-a5meknlz.googlevideo.com r5---sn-a5meknlz.googlevideo.com r6---sn-a5meknlz.googlevideo.com r7---sn-a5meknlz.googlevideo.com r8---sn-a5meknlz.googlevideo.com r9---sn-a5meknlz.googlevideo.com pagead2.googlesyndication.com googleadservices.com www.googleadservices.com
+0.0.0.0 partner.googleadservices.com doubleclick.net g.doubleclick.net googleads.g.doubleclick.net securepubads.g.doubleclick.net ad.doubleclick.net pubads.g.doubleclick.net adclick.g.doubleclick.net stats.g.doubleclick.net
+0.0.0.0 fls.doubleclick.net ad-emea.doubleclick.net googletagservices.com pagead2.googleadservices.com googleads2.g.doubleclick.net ad-apac.doubleclick.net dart.l.doubleclick.net pagead46.l.doubleclick.net partnerad.l.doubleclick.net
+0.0.0.0 ad-g.doubleclick.net tpc.googlesyndication.com pagead.l.doubleclick.net static-doubleclick-net.l.google.com gstaticadssl.l.google.com static.doubleclick.net pagead-googlehosted.l.google.com
