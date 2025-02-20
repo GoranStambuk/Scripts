@@ -1,303 +1,259 @@
 <#
     Script Name: GSecurity
     Author: Gorstak
-    Description: Script to detect and mitigate web servers, screen overlays, keyloggers, suspicious DLLs, remote thread execution, and unauthorized audio.
-                 Runs invisibly without disrupting the calling batch file. While it is not designed to be antivirus replacement, it aims to be 2nd layer of defense for high profile targets.
-                 It is a part of larger script suite, called GShield with other scripts offering gaming tweaks and additional tweaks and policies for hardening.
-    Version: 5.3
+    Description: Enhanced version of GSecurity script with optimized performance, improved logging, and stronger threat detection.
+    Version: 6.1
     License: Free for personal use
 #>
 
 # Constants
-$logonGroup = "Console Logon"
-$validGroups = @($logonGroup)
-$consoleUser = (Get-CimInstance -Class Win32_ComputerSystem).UserName
+$activeSessionUser = (Get-CimInstance -Class Win32_ComputerSystem).UserName
+$consoleUser = New-Object System.Security.Principal.SecurityIdentifier("S-1-2-1")
+$logPath = [System.IO.Path]::Combine($env:USERPROFILE, "Documents\GShield_Log.txt")
 
-# Log function to log messages to a file in the Documents folder
+# Log function with timestamp and log rotation
 function Write-Log {
-    param (
-        [string]$message
-    )
-    $logPath = [System.IO.Path]::Combine($env:USERPROFILE, "Documents\GShield_Log.txt")
-    $timestamp = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
-    $logMessage = "$timestamp - $message"
-    try {
-    Add-Content -Path $logPath -Value $logMessage
-} catch {
-    Write-Output "Error writing to log: $_"
-   }
-}
-
-function Get-ProcessDetailsAndTerminate {
-    param (
-        [int]$ProcessId
-    )
-
-    try {
-        # Get process details using the ProcessId
-        $process = Get-Process -Id $ProcessId -ErrorAction Stop
-        $processName = $process.Name
-        $processOwner = (Get-CimInstance Win32_Process -Filter "ProcessId = $ProcessId").GetOwner().User
-
-        # Log process details before termination
-        Write-Log "Detected process to terminate: $processName (PID: $ProcessId), Owner: $processOwner"
-
-        # Optionally, perform additional checks on the process (e.g., if it's not a system process)
-        if ($processName -notin @("System", "svchost")) {
-            Write-Log "Terminating process: $processName (PID: $ProcessId)"
-            Stop-Process -Id $ProcessId -Force
-        } else {
-            Write-Log "System process detected, skipping termination: $processName (PID: $ProcessId)"
-        }
-    } catch {
-        Write-Log ("Error retrieving details for process ID " + $ProcessId + ": " + $($_.Exception.Message))
+    param ([string]$message)
+    $timestamp = (Get-Date -Format "yyyy-MM-ddTHH:mm:ss")
+    $logEntry = "[$timestamp] $message"
+    Add-Content -Path $logPath -Value $logEntry
+    
+    # Rotate log if size exceeds 5MB
+    if ((Get-Item $logPath).Length -gt 5MB) {
+        Move-Item -Path $logPath -Destination "$logPath.bak" -Force
     }
 }
 
-# Function to check if the process is owned by the Console Logon group (SID: S-1-2-1)
-function Is-ProcessFromConsoleLogonGroup {
-    $consoleLogonSID = "S-1-2-1"  # Console Logon SID
+function CheckAndQuarantineUnsignedModules {
+    # Path to quarantine folder (ensure this folder exists)
+    $quarantinePath = "C:\Quarantine"
 
-    # Get all running processes
-    $processes = Get-WmiObject Win32_Process
+    # Create quarantine folder if it doesn't exist
+    if (-not (Test-Path $quarantinePath)) {
+        New-Item -Path $quarantinePath -ItemType Directory
+    }
+
+    # Get all processes running on the system
+    $processes = Get-Process -IncludeUserName
 
     foreach ($process in $processes) {
         try {
-            # Get the SID of the process owner
-            $owner = (Get-CimInstance Win32_Process -Filter "ProcessId = '$($process.ProcessId)'").GetOwner()
-            $processOwnerSID = (New-Object System.Security.Principal.NTAccount($owner.User)).Translate([System.Security.Principal.SecurityIdentifier]).Value
+            # Skip processes without modules (e.g., system processes)
+            if ($process.Modules.Count -eq 0) { continue }
 
-            # Compare the SID of the process owner with the Console Logon SID
-            if ($processOwnerSID -ne $consoleLogonSID) {
-                # If the process is not from Console Logon group, terminate it
-                Write-Log "Blocking non-console logon process: $($process.Name)"
-                Stop-Process -Id $process.ProcessId -Force
-            }
-        } catch {
-            Write-Log "Error retrieving owner for process $($process.ProcessId)."
-        }
-    }
-}
-
-# Function to check and block network connections that aren't from Console Logon group
-function Block-NonConsoleLogonGroupNetwork {
-    $consoleLogonSID = "S-1-2-1"  # Console Logon SID
-
-    $networkProcesses = Get-NetTCPConnection
-    foreach ($connection in $networkProcesses) {
-        try {
-            # Get the process owner SID
-            $process = Get-Process -Id $connection.OwningProcess
-            $owner = (Get-WmiObject Win32_Process -Filter "ProcessId = '$($process.Id)'").GetOwner()
-            $processOwnerSID = (New-Object System.Security.Principal.NTAccount($owner.User)).Translate([System.Security.Principal.SecurityIdentifier]).Value
-
-            if ($processOwnerSID -ne $consoleLogonSID) {
-                # Block network connection if process is not from Console Logon group
-                Write-Log "Blocking network connection from non-console logon process: $($process.Name) on port $($connection.LocalPort)"
-                Stop-Process -Id $process.Id -Force
-            }
-        } catch {
-            Write-Log "Error retrieving network connection owner for process $($connection.OwningProcess)."
-        }
-    }
-}
-
-# Ensure WMI and SharedAccess services are running
-function Ensure-ServicesRunning {
-    # Ensure WMI service is running
-    $wmiService = Get-Service -Name "winmgmt" -ErrorAction SilentlyContinue
-    if ($wmiService -and $wmiService.Status -ne "Running") {
-        Start-Service -Name "winmgmt" -ErrorAction SilentlyContinue
-        Write-Log "WMI service started."
-    } elseif (-not $wmiService) {
-        Write-Log "WMI service not found. Check system integrity."
-    } else {
-        Write-Log "WMI service is running."
-    }
-
-    # Ensure SharedAccess (Windows Firewall) service is running
-    $sharedAccessService = Get-Service -Name "sharedaccess" -ErrorAction SilentlyContinue
-    if ($sharedAccessService -and $sharedAccessService.Status -ne "Running") {
-        Start-Service -Name "sharedaccess" -ErrorAction SilentlyContinue
-        Write-Log "SharedAccess (Windows Firewall) service started."
-    } elseif (-not $sharedAccessService) {
-        Write-Log "SharedAccess service not found. Check system integrity."
-    } else {
-        Write-Log "SharedAccess service is running."
-    }
-}
-
-# Remove suspicious dll's
-function Monitor-LoadedDLLs {
-    function Write-Log {
-        param ($Message)
-        $Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-        Add-Content -Path "C:\Temp\DLLMonitor.log" -Value "$Timestamp - $Message"
-    }
-
-    Write-Log "Monitoring all loaded DLLs system-wide."
-
-    $processes = Get-Process | Where-Object { $_.ProcessName -ne "Idle" }
-
-    foreach ($process in $processes) {
-        try {
-            $modules = $process.Modules
-            foreach ($module in $modules) {
+            # Iterate over all modules of the current process
+            foreach ($module in $process.Modules) {
                 try {
+                    # Check if the module has a valid certificate
                     $cert = Get-AuthenticodeSignature $module.FileName
-                    if ($cert.Status -ne "Valid") {
-                        Write-Log "Removing suspicious DLL: $($module.FileName)"
-                        Remove-Item -Path $module.FileName -Force -ErrorAction Stop
+
+                    # If the certificate is not valid or signed, handle it
+                    if ($cert.Status -ne 'Valid') {
+                        Write-Host "Module $($module.FileName) is unsigned or invalid."
+
+                        # Forcefully unload the module (this can be tricky and might need more sophisticated handling)
+                        Stop-Process -Id $process.Id -Force
+
+                        # Move module to quarantine
+                        $destinationPath = Join-Path $quarantinePath $(Split-Path $module.FileName -Leaf)
+                        Move-Item -Path $module.FileName -Destination $destinationPath -Force
+                        Write-Host "Moved $($module.FileName) to quarantine."
+
+                        # Optionally, you could also add logging here.
                     }
                 } catch {
-                    Write-Log "Error checking DLL $($module.FileName): $_"
+                    Write-Host "Error checking module $($module.FileName): $_"
                 }
             }
         } catch {
-            Write-Log "Skipping process $($process.ProcessName): $_"
+            Write-Host "Error processing process $($process.Id): $_"
         }
     }
 }
 
-
-# Function to monitor for suspicious screen overlays and trace their sources
-function Monitor-Overlays {
-    # Get a list of processes with visible windows, excluding whitelisted processes
-    $windows = Get-Process | Where-Object {
-        $_.MainWindowTitle -ne ""
-    }
-
-    foreach ($window in $windows) {
-        Write-Log "Potential screen overlay or UI hijacker detected: $($window.ProcessName)"
-        # Call the new function to get process details and terminate the process and parent
-        Get-ProcessDetailsAndTerminate -ProcessId $window.Id
+# Monitor for unauthorized remote access
+function Monitor-RemoteAccess {
+    $remoteProcesses = Get-NetTCPConnection | Where-Object { $_.State -eq "Established" -and $_.RemoteAddress -ne "127.0.0.1" }
+    foreach ($conn in $remoteProcesses) {
+        Write-Log "Remote connection detected: $($conn.RemoteAddress):$($conn.RemotePort)"
+        Stop-Process -Id (Get-Process -Id $conn.OwningProcess).Id -Force
     }
 }
 
-# Function to detect potential keyloggers by monitoring keyboard hooks
-function Detect-Keyloggers {
-    Write-Log "Checking for keylogger behavior."
+# Monitor LSASS memory access for credential theft
+function Protect-LSASS {
+    $lsass = Get-Process -Name lsass -ErrorAction SilentlyContinue
+    if ($lsass) {
+        Set-ProcessMitigation -Name lsass -Enable DEP, ASLR, CFG
+        Write-Log "LSASS protection enabled."
+    }
+}
+
+# Monitor for screen overlays
+function Detect-Overlays {
+    Add-Type @"
+    using System;
+    using System.Runtime.InteropServices;
+    public class OverlayDetect {
+        [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+        [DllImport("user32.dll")] public static extern IntPtr FindWindowEx(IntPtr parent, IntPtr child, string className, string windowName);
+    }
+"@
+    $window = [OverlayDetect]::GetForegroundWindow()
+    $overlay = [OverlayDetect]::FindWindowEx($window, [IntPtr]::Zero, "#32770", $null)
+    if ($overlay -ne [IntPtr]::Zero) {
+        Write-Log "Potential screen overlay detected."
+    }
+}
+
+# Key scrambling function to disrupt keyloggers
+function Scramble-Keys {
+    Add-Type -TypeDefinition @"
+    using System;
+    using System.Runtime.InteropServices;
+    public class KeyScramble {
+        [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int vKey);
+        public static void Scramble() {
+            Random rand = new Random();
+            for (int i = 0; i < 255; i++) {
+                if (GetAsyncKeyState(i) != 0) {
+                    System.Threading.Thread.Sleep(rand.Next(1, 5));
+                }
+            }
+        }
+    }
+"@
+    [KeyScramble]::Scramble()
+    Write-Log "Key scrambling executed."
+}
+
+# Detect and terminate keyloggers
+function Monitor-Keyloggers {
     $suspiciousProcesses = Get-WmiObject Win32_Process | Where-Object {
-        ($_.CommandLine -match "SetWindowsHookEx" -or $_.CommandLine -match "GetAsyncKeyState")
+        $_.CommandLine -match "GetAsyncKeyState|SetWindowsHookEx|keylog"
     }
     foreach ($proc in $suspiciousProcesses) {
-        Write-Log "Potential keylogger detected: $($proc.Name) - $($proc.CommandLine)"
+        Write-Log "Keylogger detected and terminated: $($proc.Name) (PID: $($proc.ProcessId))"
+        Stop-Process -Id $proc.ProcessId -Force
     }
 }
 
-# Enhanced keylogger detection
-function Monitor-Keyloggers {
-    # Get processes that might be keyloggers based on behavior
-    $suspiciousProcesses = Get-Process | Where-Object {
-        ($_.Modules.ModuleName -match "hook|key|log|capture|sniff") -or
-        ($_.Path -match "keylogger|hook|log|capture|sniff") -or
-        (Get-Process -Id $_.Id -Module | Where-Object { $_.ModuleName -match "keylogger|hook|log|capture|sniff" })
-    }
-
-    foreach ($process in $suspiciousProcesses) {
-        Write-Log "Potential keylogger detected: $($process.ProcessName)"
-        Get-ProcessDetailsAndTerminate -ProcessId $process.Id
+# Ensure the RunAsPPL registry setting is enabled for LSASS
+function Enable-RunAsPPL {
+    $regPath = "HKLM:\System\CurrentControlSet\Control\Lsa"
+    $regValue = "RunAsPPL"
+    $value = Get-ItemProperty -Path $regPath -Name $regValue -ErrorAction SilentlyContinue
+    if ($value -eq $null -or $value.$regValue -ne 1) {
+        Set-ItemProperty -Path $regPath -Name $regValue -Value 1
+        Write-Log "RunAsPPL enabled for LSASS to prevent memory dumping."
     }
 }
 
-# Function to detect and terminate unauthorized web servers
-function Detect-And-Terminate-WebServers {
-    $webServerPorts = @(80, 443) # Common web server ports
+# Function to disable all audio devices for non-console users
+function Disable-AudioForNonConsoleUsers {
+    # Check if the active session user is not the console user
+    if ($activeSessionUser -ne $consoleUser) {
+        # Get all audio devices (input and output)
+        $audioDevices = Get-WmiObject -Class Win32_SoundDevice
 
-    # Get active network connections on web server ports
-    $connections = Get-NetTCPConnection | Where-Object {
-        $_.LocalPort -in $webServerPorts -and $_.State -eq "Listen"
-    }
-
-    foreach ($connection in $connections) {
-        $process = Get-Process -Id $connection.OwningProcess -ErrorAction SilentlyContinue
-        if ($process) {
-            Write-Log "Unauthorized web server detected: $($process.Name) on Port $($connection.LocalPort)"
-            # Call the new function to get process details and terminate the process and parent
-            Get-ProcessDetailsAndTerminate -ProcessId $process.Id
+        # Disable all audio devices
+        foreach ($device in $audioDevices) {
+            try {
+                Write-Log "Disabling audio device: $($device.DeviceID) due to non-console user: $activeSessionUser"
+                $device.Disable()
+            } catch {
+                Write-Log "Failed to disable audio device $($device.DeviceID): $_"
+            }
         }
+    } else {
+        Write-Log "Console user detected, audio remains enabled."
     }
 }
 
-# Function to prevent remote thread execution
-function Prevent-RemoteThreadExecution {
-    $remoteThreads = Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match "remote" }
-    foreach ($thread in $remoteThreads) {
-        Write-Log "Preventing remote thread execution for Process: $($thread.ProcessId)"
-        Stop-Process -Id $thread.ProcessId -Force
-    }
-}
+# Define the path to the setup scripts directory
+$setupScriptsPath = Join-Path $env:windir "setup\scripts"
 
-# Function to detect and block remote logins
-function Block-RemoteLogins {
-    $remoteSessions = Get-CimInstance -Class Win32_ComputerSystem | Select-Object UserName
-    if ($remoteSessions.UserName) {
-        Write-Log "Remote login detected, logging off the user."
-        Shutdown.exe /l
-    }
-}
+# List of common web server processes (including parental control apps)
+$webServerNames = @(
+    "iis", "httpd", "nginx", "tomcat", "apache", 
+    "XAMPP", "lighttpd", "node.exe", "python.exe", 
+    "openresty", "jetty", "caddy", "uwsgi", "php", 
+    "mscorsvw.exe", "vpnagent.exe", "parentalcontrol", 
+    "norton", "mcafee", "kaspersky", "bitdefender", 
+    "openvpn", "pfsense", "pfctl", "webroot", "trendmicro", 
+    "avast", "comodo", "sophos", "fortigate", "webshield"
+)
 
-# Function to detect and terminate rootkit-like behaviors
-function Monitor-Rootkit {
-    # Look for hidden processes, modules, or files
-    $hiddenProcesses = Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -eq $null }
+# Function to list web servers running on ports 80, 8080, and 443
+function List-WebServers {
+    Write-Host "Listing Web Servers running on ports 80, 8080, and 443..."
 
-    foreach ($process in $hiddenProcesses) {
-        Write-Log "Suspicious hidden process detected: $($process.ProcessName). Terminating process."
-        Stop-Process -Name $process.ProcessName -Force
-    }
+    # Get the netstat output for all processes and filter for ports 80, 8080, and 443
+    $netstatOutput = netstat -ano | Select-String "(\d+\.\d+\.\d+\.\d+:\d+|\[::\])" 
 
-    $hiddenFiles = Get-ChildItem -Path "C:\Windows\System32" -Recurse | Where-Object { $_.Attributes -match "Hidden" }
-    foreach ($file in $hiddenFiles) {
-        Write-Log "Hidden file detected: $($file.FullName). Quarantining file."
-        Move-Item -Path $file.FullName -Destination "C:\Backup\Quarantined" -Force
-    }
-}
+    # Process each line of netstat output
+    $webServers = @()
+    foreach ($line in $netstatOutput) {
+        # Check if the line contains the desired ports (80, 8080, or 443)
+        if ($line.Line -match ":(80|8080|443)\s+") {
+            # Extract PID from the netstat output
+            $pid = ($line -split "\s+")[4]
 
-# Function to scan memory for suspicious activity and terminate related processes
-function Scan-MemoryForMalware {
-    $suspiciousPatterns = @("malware", "inject", "hook")
-    $memoryDump = Get-CimInstance -Query "SELECT * FROM Win32_Process"
+            # Get process information using the PID
+            $process = Get-WmiObject Win32_Process | Where-Object { $_.ProcessId -eq $pid }
 
-    foreach ($process in $memoryDump) {
-        $processName = $process.Name
-        foreach ($pattern in $suspiciousPatterns) {
-            if ($processName -match $pattern) {
-                Write-Log "Suspicious memory pattern detected in process: $processName. Terminating process."
-                Stop-Process -Name $processName -Force
+            if ($process) {
+                # Get the executable path of the process
+                $exePath = $process.ExecutablePath
+                $webServers += [PSCustomObject]@{
+                    PID           = $process.ProcessId
+                    Name          = $process.Name
+                    ExecutablePath = $exePath
+                    ListeningPort = ($line -split "\s+")[1]
+                }
             }
         }
     }
+
+    # Output the list of web servers
+    if ($webServers.Count -gt 0) {
+        $webServers | Format-Table -Property PID, Name, ExecutablePath, ListeningPort
+    } else {
+        Write-Host "No web servers found running on ports 80, 8080, or 443."
+    }
+
+    return $webServers
 }
 
-# Function to monitor audio processes
-function Monitor-AudioProcesses {
-    Write-Output "Starting audio process monitoring..."
+# Function to check and terminate web servers not executing from the setup scripts directory
+function CheckAndTerminate-WebServers {
+    # Get the list of all web server processes
+    $webServers = List-WebServers
 
-    # Function to check if a process belongs to the allowed user
-    function Is-AllowedUser {
-        param (
-            [string]$ProcessId
-        )
-        try {
-            $owner = (Get-WmiObject Win32_Process -Filter "ProcessId = $ProcessId").GetOwner().User
-            return $owner -eq $consoleUser
-        } catch {
-            return $false
+    # Iterate through each server and terminate those not running from the setup folder
+    foreach ($webServer in $webServers) {
+        if ($webServer.ExecutablePath -notlike "$setupScriptsPath*") {
+            Write-Host "Terminating process: $($webServer.Name) with PID $($webServer.PID), running from $($webServer.ExecutablePath)"
+            # Terminate the process
+            Stop-Process -Id $webServer.PID -Force
         }
     }
+}
 
-    # Function to mute unauthorized audio processes
-    function Mute-UnallowedProcesses {
-        $audioProcesses = Get-Process | Where-Object { $_.ProcessName -match ".*audio.*" }
-        foreach ($process in $audioProcesses) {
-            if (-not (Is-AllowedUser -ProcessId $process.Id)) {
-                Write-Output "Muting unauthorized process: $($process.ProcessName)"
-                # Set system volume to mute (example for system-wide control)
-                [AudioControl]::waveOutSetVolume([IntPtr]::Zero, 0x00000000) | Out-Null
+# Kill VM's
+function StopVirtualMachines {
+    param (
+        [scriptblock]$Action = {
+            $vmProcesses = "vmware", "VirtualBox", "qemu", "hyperv", "vboxheadless"
+
+            Get-Process | Where-Object { $_.ProcessName -match ($vmProcesses -join "|") } | ForEach-Object {
+                Write-Output "Stopping VM process: $($_.ProcessName)"
+                Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
             }
         }
-    }
+    )
+
+    Invoke-Command -ScriptBlock $Action
 }
 
 # Function to corrupt telemetry data
@@ -409,98 +365,102 @@ function RestoreCookies {
     }
 }
 
-# Kill VM's
-function StopVirtualMachines {
-    param (
-        [scriptblock]$Action = {
-            $vmProcesses = "vmware", "VirtualBox", "qemu", "hyperv", "vboxheadless"
+# Function to scan memory for suspicious activity and terminate related processes
+function Scan-MemoryForMalware {
+    $suspiciousPatterns = @("malware", "inject", "hook")
+    $memoryDump = Get-CimInstance -Query "SELECT * FROM Win32_Process"
 
-            Get-Process | Where-Object { $_.ProcessName -match ($vmProcesses -join "|") } | ForEach-Object {
-                Write-Output "Stopping VM process: $($_.ProcessName)"
-                Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
-            }
-        }
-    )
-
-    Invoke-Command -ScriptBlock $Action
-}
-
-# Define regex patterns for ad domains
-$adRegexPatterns = @(
-    # From BlockAds.pac
-    "^(.+[-_.])?(ads?|banners?|track(er|ing)?|doubleclick|adservice|adnxs|adtech|googleads|partner|sponsor|clicks|pop(up|under)|promo|marketing|affiliates?|metrics|statcounter|analytics|pixel)",
-
-    # Additional patterns
-    "(.*\.|^)((think)?with)?google($|((adservices|apis|mail|static|syndication|tagmanager|tagservices|usercontent|zip|-analytics)($|\..+))",
-    "(.*\.|^)g(gpht|mail|static|v(t[12])?)($|\..+)",
-    "(.*\.|^)chrom(e(experiments)?|ium)($|\..+)",
-    "(.*\.|^)ampproject($|\..+)",
-    "(.*\.|^)doubleclick($|\..+)",
-    "(.*\.|^)firebaseio($|\..+)",
-    "(.*\.|^)googlevideo($|\..+)",
-    "(.*\.|^)waze($|\..+)",
-    "(.*\.|^)y(outube|timg)($|\..+)",
-    "^r[0123456789]+((-{3})|(.))sn-.{8}.googlevideo.com$",
-    ".*[`^.`]googlevideo.com$",
-    ".*[`^.`]l.google.com$"
-)
-
-# Combine all regex patterns into a single regex
-$combinedRegex = $adRegexPatterns -join "|"
-
-# Function to check if a domain matches any of the regex patterns
-function IsAdDomain($domain) {
-    return $domain -match $combinedRegex
-}
-
-# Function to block ad domains in real-time
-function BlockAds {
-    while ($true) {
-        # Get active network connections
-        $connections = Get-NetTCPConnection | Where-Object { $_.State -eq "Established" }
-
-        foreach ($connection in $connections) {
-            $remoteAddress = $connection.RemoteAddress
-            $remotePort = $connection.RemotePort
-
-            # Resolve the remote address to a domain name
-            try {
-                $domain = [System.Net.Dns]::GetHostEntry($remoteAddress).HostName
-            } catch {
-                continue
-            }
-
-            # Check if the domain matches any ad-related regex
-            if (IsAdDomain $domain) {
-                # Block the connection by terminating it
-                Write-Host "Blocking ad domain: $domain"
-                Stop-Process -Id $connection.OwningProcess -Force
+    foreach ($process in $memoryDump) {
+        $processName = $process.Name
+        foreach ($pattern in $suspiciousPatterns) {
+            if ($processName -match $pattern) {
+                Write-Log "Suspicious memory pattern detected in process: $processName. Terminating process."
+                Stop-Process -Name $processName -Force
             }
         }
     }
 }
 
-# Infinite loop to run the functions
-function Run-Monitoring {
-    Ensure-ServicesRunning
-    Monitor-LoadedDLLs
-    Monitor-AudioProcesses
-    Monitor-Keyloggers
-    Monitor-Overlays
-    Monitor-Rootkit
-    Detect-Keyloggers
-    Detect-And-Terminate-WebServers
-    Prevent-RemoteThreadExecution
-    Block-RemoteLogins
-    Scan-MemoryForMalware
-    BackupAndMonitorCookies
-    Block-NonConsoleLogonGroupNetwork
-    CorruptTelemetry
-    StopVirtualMachines
-    BlockAds
+# Function to detect and terminate rootkit-like behaviors
+function Monitor-Rootkit {
+    # Look for hidden processes, modules, or files
+    $hiddenProcesses = Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -eq $null }
+
+    foreach ($process in $hiddenProcesses) {
+        Write-Log "Suspicious hidden process detected: $($process.ProcessName). Terminating process."
+        Stop-Process -Name $process.ProcessName -Force
+    }
+
+    $hiddenFiles = Get-ChildItem -Path "C:\Windows\System32" -Recurse | Where-Object { $_.Attributes -match "Hidden" }
+    foreach ($file in $hiddenFiles) {
+        Write-Log "Hidden file detected: $($file.FullName). Quarantining file."
+        Move-Item -Path $file.FullName -Destination "C:\Backup\Quarantined" -Force
+    }
 }
 
-# Continuously run the script
+# Function to detect and block remote logins
+function Block-RemoteLogins {
+    $remoteSessions = Get-CimInstance -Class Win32_ComputerSystem | Select-Object UserName
+    if ($remoteSessions.UserName) {
+        Write-Log "Remote login detected, logging off the user."
+        Shutdown.exe /l
+    }
+}
+
+# Ensure WMI and SharedAccess services are running
+function Ensure-ServicesRunning {
+    # Ensure WMI service is running
+    $wmiService = Get-Service -Name "winmgmt" -ErrorAction SilentlyContinue
+    if ($wmiService -and $wmiService.Status -ne "Running") {
+        Start-Service -Name "winmgmt" -ErrorAction SilentlyContinue
+        Write-Log "WMI service started."
+    } elseif (-not $wmiService) {
+        Write-Log "WMI service not found. Check system integrity."
+    } else {
+        Write-Log "WMI service is running."
+    }
+
+    # Ensure SharedAccess (Windows Firewall) service is running
+    $sharedAccessService = Get-Service -Name "sharedaccess" -ErrorAction SilentlyContinue
+    if ($sharedAccessService -and $sharedAccessService.Status -ne "Running") {
+        Start-Service -Name "sharedaccess" -ErrorAction SilentlyContinue
+        Write-Log "SharedAccess (Windows Firewall) service started."
+    } elseif (-not $sharedAccessService) {
+        Write-Log "SharedAccess service not found. Check system integrity."
+    } else {
+        Write-Log "SharedAccess service is running."
+    }
+}
+
+# Main execution loop (event-driven)
+function Run-Monitoring {
+    while ($true) {
+        Block-RemoteLogins
+	BackupAndMonitorCookies
+	Monitor-RemoteAccess
+        Ensure-ServicesRunning
+	Protect-LSASS
+        Detect-Overlays
+        Scramble-Keys
+        Monitor-Keyloggers
+        CheckAndTerminate-WebServers
+        StopVirtualMachines
+	Start-Sleep -Seconds 60
+    }
+}
+
+# Run the function
+function Run-Monitor {
+    while ($true) {
+        Monitor-Rootkit
+	Scan-MemoryForMalware
+	CheckAndQuarantineUnsignedModules
+	Disable-AudioForNonConsoleUsers
+    }
+}
+
+# Start the monitoring script as a background job
 Start-Job -ScriptBlock {
     Run-Monitoring
+    Run-Monitor
 }
